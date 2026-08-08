@@ -1,0 +1,211 @@
+name: Auto Update
+
+on:
+  schedule:
+    # CLIProxyAPI publishes releases many times a day, so poll hourly. The
+    # offset keeps this off the top of the hour, where scheduled runs queue.
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-update
+  cancel-in-progress: true
+
+jobs:
+  check-update:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.latest.outputs.changed }}
+      server_changed: ${{ steps.latest.outputs.server_changed }}
+      panel_changed: ${{ steps.latest.outputs.panel_changed }}
+      server_version: ${{ steps.latest.outputs.server_version }}
+      panel_version: ${{ steps.latest.outputs.panel_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Generate release metadata
+        id: latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # update.sh exits non-zero and emits nothing if either upstream has a
+          # half-published release, so a failure here must not be swallowed.
+          RELEASE_NOTES_DIR=release-notes ./update.sh > releases.nix.new
+
+          read_version() {
+            sed -n "/^  $1 = {/,/^  };/s/^[[:space:]]*version = \"\(.*\)\";$/\1/p" releases.nix.new | head -n1
+          }
+
+          server_version="$(read_version server)"
+          panel_version="$(read_version panel)"
+
+          if [[ -z "${server_version}" || -z "${panel_version}" ]]; then
+            echo "Failed to parse versions from the generated releases.nix."
+            cat releases.nix.new
+            exit 1
+          fi
+
+          echo "server_version=${server_version}" >>"${GITHUB_OUTPUT}"
+          echo "panel_version=${panel_version}" >>"${GITHUB_OUTPUT}"
+
+          if cmp -s releases.nix releases.nix.new; then
+            echo "changed=false" >>"${GITHUB_OUTPUT}"
+            echo "server_changed=false" >>"${GITHUB_OUTPUT}"
+            echo "panel_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          changed_component() {
+            local name="$1"
+            if sed -n "/^  $name = {/,/^  };/p" releases.nix \
+              | cmp -s - <(sed -n "/^  $name = {/,/^  };/p" releases.nix.new); then
+              echo false
+            else
+              echo true
+            fi
+          }
+
+          echo "server_changed=$(changed_component server)" >>"${GITHUB_OUTPUT}"
+          echo "panel_changed=$(changed_component panel)" >>"${GITHUB_OUTPUT}"
+
+          mv releases.nix.new releases.nix
+          echo "changed=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload updated releases.nix
+        if: steps.latest.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updated-releases
+          path: |
+            releases.nix
+            release-notes
+          if-no-files-found: error
+
+  build:
+    needs: check-update
+    if: needs.check-update.outputs.changed == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Download updated releases.nix
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: updated-releases
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Check flake
+        if: runner.os == 'Linux'
+        run: nix flake check --all-systems --no-build
+
+      - name: Build server package
+        if: needs.check-update.outputs.server_changed == 'true'
+        run: nix build .#cliproxyapi -L
+
+      - name: Build management center package
+        if: needs.check-update.outputs.panel_changed == 'true'
+        run: nix build .#cliproxyapi-management-center -L
+
+  push:
+    needs:
+      - check-update
+      - build
+    if: needs.check-update.outputs.changed == 'true'
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Download updated releases.nix
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: updated-releases
+
+      - name: Commit the update
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- releases.nix; then
+            echo "No update available."
+            exit 0
+          fi
+
+          server_changed='${{ needs.check-update.outputs.server_changed }}'
+          panel_changed='${{ needs.check-update.outputs.panel_changed }}'
+          server_version='${{ needs.check-update.outputs.server_version }}'
+          panel_version='${{ needs.check-update.outputs.panel_version }}'
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          subject=""
+          if [[ "${server_changed}" == "true" ]]; then
+            subject="server: ${server_version}"
+          fi
+          if [[ "${panel_changed}" == "true" ]]; then
+            if [[ -n "${subject}" ]]; then
+              subject="${subject}, panel: ${panel_version}"
+            else
+              subject="panel: ${panel_version}"
+            fi
+          fi
+
+          message="$(mktemp)"
+          {
+            printf '%s\n\n' "${subject}"
+
+            append_notes() {
+              local component="$1" version="$2"
+              local notes="release-notes/${component}.md"
+
+              printf '## %s %s\n\n' "${component}" "${version}"
+              if [[ -s "${notes}" ]]; then
+                cat "${notes}"
+              else
+                printf 'No upstream release notes provided.\n'
+              fi
+              printf '\nUpstream release: %s\n\n' "$(<"release-notes/${component}.url")"
+            }
+
+            if [[ "${server_changed}" == "true" ]]; then
+              append_notes server "${server_version}"
+            fi
+            if [[ "${panel_changed}" == "true" ]]; then
+              append_notes panel "${panel_version}"
+            fi
+          } >"${message}"
+
+          git add releases.nix
+          git commit --cleanup=verbatim -F "${message}"
+          rm -f "${message}"
+
+          git push
