@@ -16,8 +16,7 @@ let
 
   panelDir = "${cfg.managementCenter}/share/cliproxyapi/static";
 
-  # The seed template carries every setting except the secrets, which are
-  # substituted at activation time so they never enter the Nix store.
+  # Secrets are substituted at activation instead, keeping them out of the store.
   seedTemplate = yamlFormat.generate "cliproxyapi-config-seed.yaml" (
     cfg.settings
     // {
@@ -39,14 +38,9 @@ let
     ]
     ++ lib.optional cfg.localModel "-local-model";
 
-  # Seeds config.yaml exactly once. The Management Center rewrites this file at
-  # runtime (PUT /v0/management/config.yaml) and hot-reloads it, so an existing
-  # file is always left alone -- Nix owns the package and the service, not the
-  # config.
-  #
-  # Kept as its own program rather than inline activation text so the secrets
-  # can be exported into yq's environment without ever passing through a
-  # command line (visible in ps) or the Nix store.
+  # The Management Center rewrites config.yaml at runtime, so Nix owns the
+  # package and the service but never the config. A separate program rather than
+  # inline activation text, so secrets reach yq via env instead of argv.
   seedProgram = pkgs.writeShellApplication {
     name = "cliproxyapi-seed";
     runtimeInputs = [ pkgs.yq-go ];
@@ -57,11 +51,9 @@ let
       mkdir -p "$config_dir/auth" "$config_dir/logs"
       chmod 700 "$config_dir"
 
-      # Secret lookups can fail transiently -- a locked vault during a
-      # non-interactive switch is the common case -- and a config seeded with an
-      # empty secret-key leaves every /v0/management route returning 404. So the
-      # secrets are read lazily and only ever written into fields that are
-      # currently empty, which makes this safe to re-run on every activation.
+      # A locked vault mid-switch would otherwise seed an empty secret-key, which
+      # 404s every management route. Only empty fields are written, so re-running
+      # on each activation heals that.
       read_secrets() {
         CPA_SECRET=""
         CPA_PROXY=""
@@ -99,10 +91,8 @@ let
         exit 0
       fi
 
-      # The Management Center owns this file from here on, so only genuinely
-      # empty secrets are backfilled. Note CLIProxyAPI replaces a plaintext
-      # secret-key with a bcrypt hash on startup, which reads as non-empty and
-      # is therefore never disturbed.
+      # CLIProxyAPI rewrites a plaintext secret-key as a bcrypt hash on startup,
+      # which reads as non-empty and so is never disturbed.
       needs_secret=false
       needs_proxy=false
 
@@ -141,9 +131,8 @@ let
     run ${lib.getExe seedProgram}
   '';
 
-  # tailscale serve is control-plane node state, not a config file, and no Nix
-  # module (including nix-darwin's) can express it -- so apply it idempotently
-  # here instead. A missing or logged-out tailscaled must never fail a switch.
+  # tailscale serve is control-plane node state that no Nix module can express,
+  # so apply it idempotently here. Never fail a switch over it.
   tailscaleServeScript = lib.optionalString (isDarwin && cfg.tailscaleServePort != null) ''
     if [ -x ${lib.escapeShellArg cfg.tailscaleCommand} ]; then
       if ${lib.escapeShellArg cfg.tailscaleCommand} serve status 2>/dev/null | grep -q ${toString cfg.tailscaleServePort}; then
@@ -276,9 +265,8 @@ in
 
     home.packages = [ cfg.package ];
 
-    # Must run before the service manager picks the unit up: launchd refuses to
-    # start a job whose WorkingDirectory is missing, and both home-manager
-    # entries would otherwise be unordered siblings of "writeBoundary".
+    # launchd refuses a job whose WorkingDirectory is missing, and both entries
+    # would otherwise be unordered siblings of "writeBoundary".
     home.activation.cliproxyapi = lib.hm.dag.entryBetween
       [ (if isDarwin then "setupLaunchAgents" else "reloadSystemd") ]
       [ "writeBoundary" ]
