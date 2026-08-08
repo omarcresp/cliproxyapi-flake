@@ -228,9 +228,13 @@ in
 
     home.packages = [ cfg.package ];
 
-    home.activation.cliproxyapi = lib.hm.dag.entryAfter [ "writeBoundary" ] (
-      seedScript + tailscaleServeScript
-    );
+    # Must run before the service manager picks the unit up: launchd refuses to
+    # start a job whose WorkingDirectory is missing, and both home-manager
+    # entries would otherwise be unordered siblings of "writeBoundary".
+    home.activation.cliproxyapi = lib.hm.dag.entryBetween
+      [ (if isDarwin then "setupLaunchAgents" else "reloadSystemd") ]
+      [ "writeBoundary" ]
+      (seedScript + tailscaleServeScript);
 
     launchd.agents.cliproxyapi = lib.mkIf isDarwin {
       enable = true;
