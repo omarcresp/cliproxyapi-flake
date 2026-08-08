@@ -57,35 +57,83 @@ let
       mkdir -p "$config_dir/auth" "$config_dir/logs"
       chmod 700 "$config_dir"
 
-      if [ -e "$config_file" ]; then
-        echo "cliproxyapi: $config_file already exists, leaving it alone"
+      # Secret lookups can fail transiently -- a locked vault during a
+      # non-interactive switch is the common case -- and a config seeded with an
+      # empty secret-key leaves every /v0/management route returning 404. So the
+      # secrets are read lazily and only ever written into fields that are
+      # currently empty, which makes this safe to re-run on every activation.
+      read_secrets() {
+        CPA_SECRET=""
+        CPA_PROXY=""
+        ${lib.optionalString (cfg.secretKeyCommand != null) ''
+          CPA_SECRET="$(${cfg.secretKeyCommand} 2>/dev/null || true)"
+        ''}
+        ${lib.optionalString (cfg.apiKeyCommand != null) ''
+          CPA_PROXY="$(${cfg.apiKeyCommand} 2>/dev/null || true)"
+        ''}
+        export CPA_SECRET CPA_PROXY
+      }
+
+      write_atomically() {
+        chmod 600 "$config_file.tmp"
+        mv "$config_file.tmp" "$config_file"
+      }
+
+      umask 077
+
+      if [ ! -e "$config_file" ]; then
+        read_secrets
+
+        if [ -z "$CPA_SECRET" ]; then
+          echo "cliproxyapi: WARNING could not read the management secret key." >&2
+          echo "cliproxyapi: WARNING seeding without it; every /v0/management route will 404." >&2
+          echo "cliproxyapi: WARNING re-run activation once the secret store is reachable." >&2
+        fi
+
+        yq '.remote-management.secret-key = strenv(CPA_SECRET)
+            | .api-keys = [strenv(CPA_PROXY)]' \
+          ${seedTemplate} > "$config_file.tmp"
+        write_atomically
+
+        echo "cliproxyapi: seeded $config_file"
         exit 0
       fi
 
-      CPA_SECRET=""
-      CPA_PROXY=""
-      ${lib.optionalString (cfg.secretKeyCommand != null) ''
-        CPA_SECRET="$(${cfg.secretKeyCommand} 2>/dev/null || true)"
-      ''}
-      ${lib.optionalString (cfg.apiKeyCommand != null) ''
-        CPA_PROXY="$(${cfg.apiKeyCommand} 2>/dev/null || true)"
-      ''}
-      export CPA_SECRET CPA_PROXY
+      # The Management Center owns this file from here on, so only genuinely
+      # empty secrets are backfilled. Note CLIProxyAPI replaces a plaintext
+      # secret-key with a bcrypt hash on startup, which reads as non-empty and
+      # is therefore never disturbed.
+      needs_secret=false
+      needs_proxy=false
 
-      if [ -z "$CPA_SECRET" ]; then
-        echo "cliproxyapi: WARNING could not read the management secret key." >&2
-        echo "cliproxyapi: WARNING seeding without it; every /v0/management route will 404" >&2
-        echo "cliproxyapi: WARNING until remote-management.secret-key is set in $config_file" >&2
+      if [ -z "$(yq -r '.remote-management.secret-key // ""' "$config_file")" ]; then
+        needs_secret=true
+      fi
+      if [ "$(yq -r '[.api-keys[]? | select(. != "")] | length' "$config_file")" = "0" ]; then
+        needs_proxy=true
       fi
 
-      umask 077
-      yq '.remote-management.secret-key = strenv(CPA_SECRET)
-          | .api-keys = [strenv(CPA_PROXY)]' \
-        ${seedTemplate} > "$config_file.tmp"
+      if [ "$needs_secret" = false ] && [ "$needs_proxy" = false ]; then
+        echo "cliproxyapi: $config_file is complete, leaving it alone"
+        exit 0
+      fi
 
-      chmod 600 "$config_file.tmp"
-      mv "$config_file.tmp" "$config_file"
-      echo "cliproxyapi: seeded $config_file"
+      read_secrets
+
+      if [ "$needs_secret" = true ] && [ -n "$CPA_SECRET" ]; then
+        yq '.remote-management.secret-key = strenv(CPA_SECRET)' "$config_file" > "$config_file.tmp"
+        write_atomically
+        echo "cliproxyapi: backfilled the management secret key"
+      elif [ "$needs_secret" = true ]; then
+        echo "cliproxyapi: WARNING remote-management.secret-key is empty and could not be read." >&2
+        echo "cliproxyapi: WARNING the Management API will 404 until it is set." >&2
+      fi
+
+      if [ "$needs_proxy" = true ] && [ -n "$CPA_PROXY" ]; then
+        yq '.api-keys = [strenv(CPA_PROXY)]' "$config_file" > "$config_file.tmp"
+        write_atomically
+        echo "cliproxyapi: backfilled api-keys"
+      fi
     '';
   };
 
