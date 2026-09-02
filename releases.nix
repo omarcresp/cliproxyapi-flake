@@ -8,7 +8,7 @@
   };
 
   panel = {
-    version = "1.22.11";
-    hash = "sha256-VqHTB3a49eMhII4K3y/GafWB86Xd7panLGtm4IS9zFk=";
+    version = "1.22.12";
+    hash = "sha256-w7kJTtoosVOWz8uIfdHsVB4fu5Y6wg5VdjeYkjqYzjw=";
   };
 }
