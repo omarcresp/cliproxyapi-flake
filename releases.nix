@@ -1,14 +1,14 @@
 {
   server = {
-    version = "7.3.1";
+    version = "7.3.2";
     sources = {
-      x86_64-linux.hash = "sha256-wHd6iOo8AXebgsMHawqaPVmCZvoMcmcFSxeMjMS01bk=";
-      aarch64-darwin.hash = "sha256-MyRmuW5/bAyo7kyTBT1xSeFx1bTjnV366591/bSGt2U=";
+      x86_64-linux.hash = "sha256-D9R7dgYS6YlulQA4J0Le7ebwJtaQPecH754zFrZq5jU=";
+      aarch64-darwin.hash = "sha256-NDdrxYIygWaIWaez42iLuQ7rJn2PGXokdgWUekeK9Ow=";
     };
   };
 
   panel = {
-    version = "1.23.0";
-    hash = "sha256-MyO6ZzZWBQlOjbqc9sRmRLd+lnvYvW0M1dTxemJxZ0Q=";
+    version = "1.23.1";
+    hash = "sha256-34EznxHcbpkf4rKaXUNmpiZUcAK8j1ZqyZrOKoewABg=";
   };
 }
