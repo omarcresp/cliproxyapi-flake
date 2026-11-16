@@ -1,9 +1,9 @@
 {
   server = {
-    version = "8.0.73";
+    version = "8.0.74";
     sources = {
-      x86_64-linux.hash = "sha256-TIHowzyTsVPYAT5PYx/GzdJzJflQrLZakBVqRUO9dK8=";
-      aarch64-darwin.hash = "sha256-rPoOlZM7wDWqEa7G5jrF9jPuPrdn0OVIY/jbtS41DSo=";
+      x86_64-linux.hash = "sha256-lCBdW+EUZMV/q14F69RNc6iRkPlBChPp54xnmHc4wm8=";
+      aarch64-darwin.hash = "sha256-IvKf64ZGruaxJLoLSpdKkvv/1x1Mh12n4h7zbWmGNfQ=";
     };
   };
 
